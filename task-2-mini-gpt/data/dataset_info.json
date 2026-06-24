@@ -1,0 +1,6 @@
+{
+  "dataset": "poetry",
+  "train": "train.txt",
+  "dev": "dev.txt",
+  "ppl_threshold": 50
+}

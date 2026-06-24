@@ -9,6 +9,7 @@
 import argparse
 import json
 import os
+import random
 import shutil
 import sys
 from pathlib import Path
@@ -36,9 +37,25 @@ def write_text_splits(text, dataset, ppl_threshold, dev_ratio=0.1):
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     if len(text) < 100:
         sys.exit(f"[错误] {dataset} 文本过短，无法切分 train/dev")
-    split_at = max(1, int(len(text) * (1 - dev_ratio)))
-    (DATA_DIR / "train.txt").write_text(text[:split_at], encoding="utf-8")
-    (DATA_DIR / "dev.txt").write_text(text[split_at:], encoding="utf-8")
+
+    if dataset == "poetry":
+        blocks = [block.strip() for block in text.split("\n\n") if block.strip()]
+        if len(blocks) >= 10:
+            random.Random(42).shuffle(blocks)
+            split_at = max(1, int(len(blocks) * (1 - dev_ratio)))
+            train_text = "\n\n".join(blocks[:split_at]) + "\n"
+            dev_text = "\n\n".join(blocks[split_at:]) + "\n"
+        else:
+            split_at = max(1, int(len(text) * (1 - dev_ratio)))
+            train_text = text[:split_at]
+            dev_text = text[split_at:]
+    else:
+        split_at = max(1, int(len(text) * (1 - dev_ratio)))
+        train_text = text[:split_at]
+        dev_text = text[split_at:]
+
+    (DATA_DIR / "train.txt").write_text(train_text, encoding="utf-8")
+    (DATA_DIR / "dev.txt").write_text(dev_text, encoding="utf-8")
     write_dataset_info(dataset, ppl_threshold)
     print(f"已生成 train.txt / dev.txt（{dataset}，dev_ratio={dev_ratio}）")
 
