@@ -1,0 +1,13 @@
+{
+  "backend": "tokenizers",
+  "bos_token": "<bos>",
+  "eos_token": "<eos>",
+  "extra_special_tokens": [
+    "<|im_start|>",
+    "<|im_end|>"
+  ],
+  "model_max_length": 1024,
+  "pad_token": "<pad>",
+  "tokenizer_class": "TokenizersBackend",
+  "unk_token": "<unk>"
+}

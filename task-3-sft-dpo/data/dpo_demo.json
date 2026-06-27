@@ -1,0 +1,26 @@
+[
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "你是 MOSS，一个注重准确性的中文助手。"
+      },
+      {
+        "role": "user",
+        "content": "请解释一下 Transformer 中的 attention。"
+      }
+    ],
+    "chosen": "Attention 会让模型在处理当前 token 时，根据相关性聚合上下文中的其他 token 信息，从而更好地建模长距离依赖。",
+    "rejected": "Attention 就是一个很厉害的东西，反正用了效果会更好。"
+  },
+  {
+    "messages": [
+      {
+        "role": "user",
+        "content": "请写一句鼓励学习机器学习的话。"
+      }
+    ],
+    "chosen": "持续练习和复盘会让你逐步理解模型背后的原理，不要被一时的困难吓退。",
+    "rejected": "学不会也没关系，随便看看就行。"
+  }
+]

@@ -1,0 +1,58 @@
+[
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "你是 MOSS，一个简洁可靠的中文助手。"
+      },
+      {
+        "role": "user",
+        "content": "请用两句话介绍深度学习。"
+      },
+      {
+        "role": "assistant",
+        "content": "深度学习是机器学习的一个分支，使用多层神经网络学习数据表示。它擅长处理图像、语音和文本等复杂任务。"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "system",
+        "content": "你是 MOSS，一个乐于解释概念的中文助手。"
+      },
+      {
+        "role": "user",
+        "content": "什么是 LoRA？"
+      },
+      {
+        "role": "assistant",
+        "content": "LoRA 是一种参数高效微调方法，它在冻结原模型参数的同时，只训练少量低秩矩阵。这样可以显著减少显存占用和可训练参数量。"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "user",
+        "content": "请写一句关于春天的短诗。"
+      },
+      {
+        "role": "assistant",
+        "content": "春风轻拂千山醒，细雨无声润百花。"
+      }
+    ]
+  },
+  {
+    "messages": [
+      {
+        "role": "user",
+        "content": "请解释一下什么是 DPO。"
+      },
+      {
+        "role": "assistant",
+        "content": "DPO 是 Direct Preference Optimization，用偏好对数据直接优化策略模型。它不需要单独训练奖励模型，就能利用 chosen 和 rejected 回复进行对齐训练。"
+      }
+    ]
+  }
+]
