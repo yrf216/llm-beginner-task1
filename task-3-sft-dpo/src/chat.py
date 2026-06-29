@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
@@ -12,9 +12,9 @@ IM_START = '<|im_start|>'
 IM_END = '<|im_end|>'
 
 
-@lru_cache(maxsize=1)
-def _tokenizer():
-    return AutoTokenizer.from_pretrained(str(MODEL_DIR), trust_remote_code=False)
+@lru_cache(maxsize=None)
+def _tokenizer(model_ref: str):
+    return AutoTokenizer.from_pretrained(model_ref, trust_remote_code=False)
 
 
 def format_messages(messages: list[dict]) -> str:
@@ -46,8 +46,14 @@ def _assistant_spans(messages: list[dict]) -> tuple[str, list[tuple[int, int]]]:
     return ''.join(parts), spans
 
 
-def build_labels(input_ids: torch.Tensor, messages: list[dict]) -> torch.Tensor:
-    tokenizer = _tokenizer()
+def build_labels(
+    input_ids: torch.Tensor,
+    messages: list[dict],
+    tokenizer=None,
+    model_path: str | Path | None = None,
+) -> torch.Tensor:
+    if tokenizer is None:
+        tokenizer = _tokenizer(str(model_path or MODEL_DIR))
     text, spans = _assistant_spans(messages)
     max_len = int(input_ids.numel())
     encoded = tokenizer(

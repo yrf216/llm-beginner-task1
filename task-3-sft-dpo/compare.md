@@ -1,24 +1,24 @@
-﻿# Base vs SFT Comparison
+# Base vs SFT Comparison
 
-Prompt 1:
-`什么是 LoRA？`
+This file should be regenerated after running task 3 on the real `Qwen2.5-0.5B` checkpoint in `local_models/Qwen2.5-0.5B`.
 
-Base output:
-A mostly invalid / unreadable response with replacement characters.
+Recommended command:
 
-SFT output:
-A different but still low-quality response dominated by repeated punctuation.
+```bash
+python src/compare.py --model-path local_models/Qwen2.5-0.5B --adapter-dir ckpt/sft --device cuda
+```
 
-Prompt 2:
-`请用两句话介绍深度学习。`
+Suggested prompts:
 
-Base output:
-Again mostly unreadable bootstrap-model output.
+- `什么是 LoRA？`
+- `请用两句话介绍深度学习。`
+- `解释一下 DPO 和 SFT 的区别。`
 
-SFT output:
-A visibly different response pattern, but still not semantically useful.
+Record:
 
-Interpretation:
-- The tuned adapter changes the model output distribution, which is enough for the task-3 local self-check path.
-- Output quality is still weak because this repository uses a tiny offline Qwen2-compatible bootstrap model instead of the real `Qwen2.5-0.5B` pretrained checkpoint.
-- Replacing `models/Qwen2.5-0.5B/` with the real pretrained model and swapping in real MOSS SFT / DPO data is the next step if you want a submission suitable for stronger human evaluation.
+- base output
+- SFT output
+- if available, DPO-tuned output
+- a short note on whether the tuned model is more helpful, more specific, or more aligned with the instruction
+
+The old bootstrap-model comparison is no longer the main result. For submission, the useful comparison is the one produced from the real checkpoint and real datasets.

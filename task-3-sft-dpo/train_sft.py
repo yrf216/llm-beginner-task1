@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import json
@@ -12,13 +12,22 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.bootstrap import MIN_MODEL_MAX_LENGTH, ensure_local_assets
+from src.bootstrap import MIN_MODEL_MAX_LENGTH, SFT_DEMO_PATH, ensure_local_assets
 from src.chat import build_labels, format_messages
 from src.lora import inject_lora, save_lora_adapter
+from src.runtime import (
+    DEFAULT_MODEL_DIR,
+    DEFAULT_SFT_DATA_PATH,
+    model_load_kwargs,
+    require_real_model,
+    resolve_data_path,
+    resolve_device,
+    resolve_dtype,
+)
 
 
 class SFTDataset(Dataset):
-    def __init__(self, tokenizer, records: list[dict], max_length: int):
+    def __init__(self, tokenizer, model_path: Path, records: list[dict], max_length: int):
         self.samples = []
         for record in records:
             text = format_messages(record['messages'])
@@ -30,7 +39,7 @@ class SFTDataset(Dataset):
             )
             input_ids = encoded.input_ids[0]
             attention_mask = encoded.attention_mask[0]
-            labels = build_labels(input_ids, record['messages'])
+            labels = build_labels(input_ids, record['messages'], tokenizer=tokenizer, model_path=model_path)
             self.samples.append(
                 {
                     'input_ids': input_ids,
@@ -64,14 +73,22 @@ def collate_fn(tokenizer, batch):
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--data-path', type=Path, default=Path('data/sft_demo.json'))
-    ap.add_argument('--model-path', type=Path, default=Path('models/Qwen2.5-0.5B'))
+    ap.add_argument('--data-path', type=Path, default=DEFAULT_SFT_DATA_PATH)
+    ap.add_argument('--model-path', type=Path, default=DEFAULT_MODEL_DIR)
     ap.add_argument('--output-dir', type=Path, default=Path('ckpt/sft'))
-    ap.add_argument('--epochs', type=int, default=12)
-    ap.add_argument('--batch-size', type=int, default=2)
-    ap.add_argument('--lr', type=float, default=2e-3)
+    ap.add_argument('--epochs', type=int, default=3)
+    ap.add_argument('--batch-size', type=int, default=1)
+    ap.add_argument('--lr', type=float, default=2e-4)
     ap.add_argument('--weight-decay', type=float, default=0.0)
     ap.add_argument('--max-length', type=int, default=MIN_MODEL_MAX_LENGTH)
+    ap.add_argument('--lora-r', type=int, default=8)
+    ap.add_argument('--lora-alpha', type=float, default=16.0)
+    ap.add_argument('--lora-dropout', type=float, default=0.05)
+    ap.add_argument('--device', type=str, default='auto', choices=['auto', 'cpu', 'cuda', 'mps'])
+    ap.add_argument('--dtype', type=str, default='auto', choices=['auto', 'float32', 'float16', 'bfloat16'])
+    ap.add_argument('--gradient-accumulation-steps', type=int, default=8)
+    ap.add_argument('--allow-bootstrap', action='store_true')
+    ap.add_argument('--allow-demo-data', action='store_true')
     ap.add_argument('--seed', type=int, default=42)
     return ap.parse_args()
 
@@ -85,19 +102,29 @@ def set_seed(seed: int):
 def main():
     args = parse_args()
     set_seed(args.seed)
-    assets = ensure_local_assets()
-    if not args.data_path.exists():
-        args.data_path = assets['sft_data']
-    if not args.model_path.exists():
-        args.model_path = assets['model_dir']
+    if args.allow_bootstrap or args.allow_demo_data:
+        ensure_local_assets()
+    args.data_path = resolve_data_path(args.data_path, SFT_DEMO_PATH, allow_demo_data=args.allow_demo_data)
+    require_real_model(args.model_path, allow_bootstrap=args.allow_bootstrap)
+    device = resolve_device(args.device)
+    dtype = resolve_dtype(args.dtype, device)
 
     tokenizer = AutoTokenizer.from_pretrained(str(args.model_path))
-    model = AutoModelForCausalLM.from_pretrained(str(args.model_path))
-    inject_lora(model, ['q_proj', 'v_proj'], r=8, alpha=16)
+    model = AutoModelForCausalLM.from_pretrained(
+        str(args.model_path),
+        **model_load_kwargs(device, dtype),
+    )
+    inject_lora(
+        model,
+        ['q_proj', 'v_proj'],
+        r=args.lora_r,
+        alpha=args.lora_alpha,
+        dropout=args.lora_dropout,
+    )
     model.train()
 
     records = json.loads(args.data_path.read_text(encoding='utf-8'))
-    dataset = SFTDataset(tokenizer, records, max_length=args.max_length)
+    dataset = SFTDataset(tokenizer, args.model_path, records, max_length=args.max_length)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -106,20 +133,24 @@ def main():
     )
 
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=args.weight_decay)
-    device = torch.device('cpu')
     model.to(device)
 
     last_loss = None
     for epoch in range(1, args.epochs + 1):
         epoch_loss = 0.0
-        for batch in loader:
+        optimizer.zero_grad(set_to_none=True)
+        for step, batch in enumerate(loader, start=1):
             batch = {k: v.to(device) for k, v in batch.items()}
-            optimizer.zero_grad(set_to_none=True)
             outputs = model(**batch)
             loss = outputs.loss
-            loss.backward()
-            optimizer.step()
+            (loss / args.gradient_accumulation_steps).backward()
+            if step % args.gradient_accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
             epoch_loss += loss.item()
+        if len(loader) % args.gradient_accumulation_steps != 0:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
         last_loss = epoch_loss / max(1, len(loader))
         print(f'epoch={epoch} loss={last_loss:.4f}')
 
@@ -127,6 +158,10 @@ def main():
         'task': 'sft',
         'loss': round(float(last_loss), 4) if last_loss is not None else None,
         'records': len(records),
+        'model_path': str(args.model_path),
+        'data_path': str(args.data_path),
+        'device': str(device),
+        'dtype': str(dtype),
     }
     save_lora_adapter(model, args.output_dir, extra_metadata=metadata)
     print(f'saved SFT adapter to {args.output_dir}')

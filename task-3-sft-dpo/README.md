@@ -1,69 +1,112 @@
-# 任务三：指令微调与偏好对齐
+# Task 3: SFT + DPO
 
-> 主大纲见仓库根 [README](../README.md)；本目录是该任务的资源、自检与提交入口。
+This task now supports two paths:
 
-## 目标
+- real-setting training with the actual `Qwen2.5-0.5B` checkpoint and external SFT / DPO data
+- local smoke testing with the tiny bootstrap checkpoint already stored in `models/Qwen2.5-0.5B`
 
-在 Qwen2.5-0.5B 上做 SFT + DPO 两阶段对齐。**扩展**实践书 v2「监督微调与 LoRA」「偏好对齐：DPO」两节：手写 LoRA、改用 MOSS 中文数据、做完整的「指令格式 → 偏好」两阶段闭环。
+The tracked `models/Qwen2.5-0.5B` directory is only for smoke tests and local self-check. Real weights are downloaded into `local_models/Qwen2.5-0.5B` so the repository stays clean.
 
-## 前置阅读
-
-- [LoRA 论文](https://arxiv.org/abs/2106.09685)
-- [DPO 论文](https://arxiv.org/abs/2305.18290)
-- [HF TRL 文档](https://huggingface.co/docs/trl) / [PEFT 文档](https://huggingface.co/docs/peft)
-- 实践书 v2《大语言模型与智能体》「监督微调与 LoRA」「偏好对齐：DPO」两节
-
-## 准备
+## Setup
 
 ```bash
 pip install -r requirements.txt
 python data/download.py
 ```
 
-## 实施步骤
+Default behavior:
 
-1. **手写 LoRA**（`src/lora.py`）：低秩矩阵注入 + forward + 反向只更新 LoRA 参数
-2. **chat template + loss masking**（`src/chat.py`）：套 Qwen 模板，给 user/system 部分打 -100
-3. **SFT 训练**（`train_sft.py`）：MOSS-003-sft 数据
-4. **DPO 训练**（`train_dpo.py`）：在 SFT 后继续训练，需要 reference model
-5. **可选贯通任务五**：用 `moss-003-sft-plugin` 训一版带工具调用的 SFT 模型
+- download `Qwen/Qwen2.5-0.5B` into `local_models/Qwen2.5-0.5B/`
+- normalize `OpenMOSS-Team/moss-003-sft-data` into `data/sft_train.json`
+- normalize `argilla/ultrafeedback-binarized-preferences-cleaned` into `data/dpo_train.json`
 
-## 实现约定
+If you only want the local smoke-test path:
 
-| 文件 | 必须导出 |
-|---|---|
-| `src/lora.py` | `inject_lora(model, target_modules, r, alpha) -> model`、`merge_lora(model) -> model` |
-| `src/chat.py` | `format_messages(messages: List[dict]) -> str` 应用 Qwen chat template；`build_labels(input_ids, messages) -> labels` 做 loss masking |
-| `ckpt/sft/` | SFT 后的 LoRA 权重目录 |
-| `ckpt/dpo/` | DPO 后的 LoRA 权重目录 |
+```bash
+python data/download.py --prepare-demo --skip-model --skip-sft --skip-dpo
+```
 
-## 自检
+## Training
+
+### SFT
+
+```bash
+python train_sft.py \
+  --model-path local_models/Qwen2.5-0.5B \
+  --data-path data/sft_train.json \
+  --device cuda
+```
+
+Common options:
+
+- `--batch-size 1 --gradient-accumulation-steps 8`
+- `--dtype bfloat16`
+- `--lora-r 8 --lora-alpha 16 --lora-dropout 0.05`
+
+### DPO
+
+```bash
+python train_dpo.py \
+  --model-path local_models/Qwen2.5-0.5B \
+  --data-path data/dpo_train.json \
+  --sft-adapter ckpt/sft \
+  --device cuda
+```
+
+## Smoke Test
+
+```bash
+python data/download.py --prepare-demo --skip-model --skip-sft --skip-dpo
+python train_sft.py --allow-bootstrap --allow-demo-data --model-path models/Qwen2.5-0.5B --data-path data/sft_demo.json --epochs 1 --gradient-accumulation-steps 1
+python train_dpo.py --allow-bootstrap --allow-demo-data --model-path models/Qwen2.5-0.5B --data-path data/dpo_demo.json --epochs 1 --gradient-accumulation-steps 1
+```
+
+## Data Format
+
+`data/sft_train.json`:
+
+```json
+[
+  {
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "Explain LoRA."},
+      {"role": "assistant", "content": "LoRA is a parameter-efficient fine-tuning method."}
+    ]
+  }
+]
+```
+
+`data/dpo_train.json`:
+
+```json
+[
+  {
+    "messages": [
+      {"role": "user", "content": "Explain Transformer attention."}
+    ],
+    "chosen": "Attention lets the model aggregate relevant context.",
+    "rejected": "Attention is just a useful trick."
+  }
+]
+```
+
+## Compare
+
+```bash
+python src/compare.py --model-path local_models/Qwen2.5-0.5B --adapter-dir ckpt/sft --device cuda
+```
+
+## Self-Check
 
 ```bash
 python eval/run.py
 ```
 
-| 测试 | 通过标准 |
-|---|---|
-| `lora_param_count` | LoRA 注入后可训参数占比 < 5% |
-| `loss_masking` | 对 mock 多轮对话，labels 中 -100 占比在 20%-90%（user/system 全 -100） |
-| `sft_vs_base` | 同一指令上 SFT 和 base 输出有可观察差异（手动确认） |
+The official self-check still validates only:
 
-## AI Tutor 反馈
+- LoRA trainable parameter ratio
+- assistant-only loss masking
+- existence of `ckpt/sft`
 
-`eval/tutor_prompt.md`。
-
-## 实验建议
-
-- 全量 vs LoRA：显存与下游质量
-- LoRA rank 消融（4/8/16/32）
-- 灾难性遗忘评估（C-Eval 子集 base vs SFT）
-- SFT-only vs SFT+DPO 在偏好上的差异
-
-## 提交
-
-到 [nndl-discussion](https://github.com/nndl/nndl-discussion/discussions)。
-
-## 时间
-
-约 2-3 周。
+It does not prove real downstream quality. For submission, you still need to compare base / SFT / DPO outputs manually and document the real experiment setup.

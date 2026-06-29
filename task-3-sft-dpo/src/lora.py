@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import math
@@ -19,8 +19,23 @@ class LoRALinear(nn.Module):
         self.alpha = float(alpha)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.scaling = self.alpha / self.r
-        self.lora_A = nn.Parameter(torch.empty(self.r, base_layer.in_features))
-        self.lora_B = nn.Parameter(torch.zeros(base_layer.out_features, self.r))
+        weight = base_layer.weight
+        self.lora_A = nn.Parameter(
+            torch.empty(
+                self.r,
+                base_layer.in_features,
+                device=weight.device,
+                dtype=weight.dtype,
+            )
+        )
+        self.lora_B = nn.Parameter(
+            torch.zeros(
+                base_layer.out_features,
+                self.r,
+                device=weight.device,
+                dtype=weight.dtype,
+            )
+        )
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
         nn.init.zeros_(self.lora_B)
         for param in self.base_layer.parameters():
@@ -36,8 +51,9 @@ class LoRALinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         base = self.base_layer(x)
-        update = (self.dropout(x) @ self.lora_A.t()) @ self.lora_B.t()
-        return base + update * self.scaling
+        dropped = self.dropout(x).to(self.lora_A.dtype)
+        update = (dropped @ self.lora_A.t()) @ self.lora_B.t()
+        return base + update.to(base.dtype) * self.scaling
 
     def merged_linear(self) -> nn.Linear:
         merged = nn.Linear(
@@ -153,7 +169,7 @@ def load_lora_adapter(model: nn.Module, adapter_dir: str | Path):
     state = payload['state_dict']
     for name, module in model.named_modules():
         if isinstance(module, LoRALinear):
-            module.lora_A.data.copy_(state[f"{name}.lora_A"])
-            module.lora_B.data.copy_(state[f"{name}.lora_B"])
+            module.lora_A.data.copy_(state[f"{name}.lora_A"].to(module.lora_A.dtype))
+            module.lora_B.data.copy_(state[f"{name}.lora_B"].to(module.lora_B.dtype))
     model._lora_config = config
     return model

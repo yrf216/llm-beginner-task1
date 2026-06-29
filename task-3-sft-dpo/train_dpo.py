@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import json
@@ -12,9 +12,18 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.bootstrap import MIN_MODEL_MAX_LENGTH, ensure_local_assets
+from src.bootstrap import DPO_DEMO_PATH, MIN_MODEL_MAX_LENGTH, ensure_local_assets
 from src.chat import format_messages
 from src.lora import inject_lora, load_lora_adapter, save_lora_adapter
+from src.runtime import (
+    DEFAULT_DPO_DATA_PATH,
+    DEFAULT_MODEL_DIR,
+    model_load_kwargs,
+    require_real_model,
+    resolve_data_path,
+    resolve_device,
+    resolve_dtype,
+)
 
 
 def masked_log_prob(model, input_ids, attention_mask, prompt_lens: torch.Tensor):
@@ -75,15 +84,23 @@ def collate_fn(tokenizer, batch):
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--data-path', type=Path, default=Path('data/dpo_demo.json'))
-    ap.add_argument('--model-path', type=Path, default=Path('models/Qwen2.5-0.5B'))
+    ap.add_argument('--data-path', type=Path, default=DEFAULT_DPO_DATA_PATH)
+    ap.add_argument('--model-path', type=Path, default=DEFAULT_MODEL_DIR)
     ap.add_argument('--sft-adapter', type=Path, default=Path('ckpt/sft'))
     ap.add_argument('--output-dir', type=Path, default=Path('ckpt/dpo'))
-    ap.add_argument('--epochs', type=int, default=8)
-    ap.add_argument('--batch-size', type=int, default=2)
-    ap.add_argument('--lr', type=float, default=1e-3)
+    ap.add_argument('--epochs', type=int, default=2)
+    ap.add_argument('--batch-size', type=int, default=1)
+    ap.add_argument('--lr', type=float, default=1e-4)
     ap.add_argument('--beta', type=float, default=0.1)
     ap.add_argument('--max-length', type=int, default=MIN_MODEL_MAX_LENGTH)
+    ap.add_argument('--lora-r', type=int, default=8)
+    ap.add_argument('--lora-alpha', type=float, default=16.0)
+    ap.add_argument('--lora-dropout', type=float, default=0.05)
+    ap.add_argument('--device', type=str, default='auto', choices=['auto', 'cpu', 'cuda', 'mps'])
+    ap.add_argument('--dtype', type=str, default='auto', choices=['auto', 'float32', 'float16', 'bfloat16'])
+    ap.add_argument('--gradient-accumulation-steps', type=int, default=8)
+    ap.add_argument('--allow-bootstrap', action='store_true')
+    ap.add_argument('--allow-demo-data', action='store_true')
     ap.add_argument('--seed', type=int, default=42)
     return ap.parse_args()
 
@@ -97,22 +114,29 @@ def set_seed(seed: int):
 def main():
     args = parse_args()
     set_seed(args.seed)
-    assets = ensure_local_assets()
-    if not args.data_path.exists():
-        args.data_path = assets['dpo_data']
-    if not args.model_path.exists():
-        args.model_path = assets['model_dir']
+    if args.allow_bootstrap or args.allow_demo_data:
+        ensure_local_assets()
+    args.data_path = resolve_data_path(args.data_path, DPO_DEMO_PATH, allow_demo_data=args.allow_demo_data)
+    require_real_model(args.model_path, allow_bootstrap=args.allow_bootstrap)
+    device = resolve_device(args.device)
+    dtype = resolve_dtype(args.dtype, device)
 
     tokenizer = AutoTokenizer.from_pretrained(str(args.model_path))
-    policy = AutoModelForCausalLM.from_pretrained(str(args.model_path))
-    reference = AutoModelForCausalLM.from_pretrained(str(args.model_path))
-    inject_lora(policy, ['q_proj', 'v_proj'], r=8, alpha=16)
+    policy = AutoModelForCausalLM.from_pretrained(
+        str(args.model_path),
+        **model_load_kwargs(device, dtype),
+    )
+    reference = AutoModelForCausalLM.from_pretrained(
+        str(args.model_path),
+        **model_load_kwargs(device, dtype),
+    )
+    inject_lora(policy, ['q_proj', 'v_proj'], r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout)
     if args.sft_adapter.exists():
         load_lora_adapter(policy, args.sft_adapter)
-        inject_lora(reference, ['q_proj', 'v_proj'], r=8, alpha=16)
+        inject_lora(reference, ['q_proj', 'v_proj'], r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout)
         load_lora_adapter(reference, args.sft_adapter)
     else:
-        inject_lora(reference, ['q_proj', 'v_proj'], r=8, alpha=16)
+        inject_lora(reference, ['q_proj', 'v_proj'], r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout)
     for param in reference.parameters():
         param.requires_grad = False
     reference.eval()
@@ -128,16 +152,15 @@ def main():
     )
 
     optimizer = AdamW([p for p in policy.parameters() if p.requires_grad], lr=args.lr)
-    device = torch.device('cpu')
     policy.to(device)
     reference.to(device)
 
     last_loss = None
     for epoch in range(1, args.epochs + 1):
         epoch_loss = 0.0
-        for batch in loader:
+        optimizer.zero_grad(set_to_none=True)
+        for step, batch in enumerate(loader, start=1):
             batch = {k: v.to(device) for k, v in batch.items()}
-            optimizer.zero_grad(set_to_none=True)
             chosen_pi = masked_log_prob(policy, batch['chosen_ids'], batch['chosen_mask'], batch['prompt_len'])
             rejected_pi = masked_log_prob(policy, batch['rejected_ids'], batch['rejected_mask'], batch['prompt_len'])
             with torch.no_grad():
@@ -145,9 +168,14 @@ def main():
                 rejected_ref = masked_log_prob(reference, batch['rejected_ids'], batch['rejected_mask'], batch['prompt_len'])
             preference_logits = (chosen_pi - rejected_pi) - (chosen_ref - rejected_ref)
             loss = -F.logsigmoid(args.beta * preference_logits).mean()
-            loss.backward()
-            optimizer.step()
+            (loss / args.gradient_accumulation_steps).backward()
+            if step % args.gradient_accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
             epoch_loss += loss.item()
+        if len(loader) % args.gradient_accumulation_steps != 0:
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
         last_loss = epoch_loss / max(1, len(loader))
         print(f'epoch={epoch} dpo_loss={last_loss:.4f}')
 
@@ -156,6 +184,10 @@ def main():
         'loss': round(float(last_loss), 4) if last_loss is not None else None,
         'records': len(records),
         'beta': args.beta,
+        'model_path': str(args.model_path),
+        'data_path': str(args.data_path),
+        'device': str(device),
+        'dtype': str(dtype),
     }
     save_lora_adapter(policy, args.output_dir, extra_metadata=metadata)
     print(f'saved DPO adapter to {args.output_dir}')

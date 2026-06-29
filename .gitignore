@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+task-3-sft-dpo/local_models/
+task-3-sft-dpo/data/sft_train.json
+task-3-sft-dpo/data/dpo_train.json
